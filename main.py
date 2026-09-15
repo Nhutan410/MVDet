@@ -4,7 +4,6 @@ os.environ['OMP_NUM_THREADS'] = '1'
 import argparse
 import sys
 import shutil
-from distutils.dir_util import copy_tree
 import datetime
 import tqdm
 import numpy as np
@@ -105,7 +104,7 @@ def main(args):
         if not args.resume else f'logs/{args.dataset}_frame/{loss_tag}/{args.variant}/{args.resume}'
     if args.resume is None:
         os.makedirs(logdir, exist_ok=True)
-        copy_tree('./multiview_detector', logdir + '/scripts/multiview_detector')
+        shutil.copytree('./multiview_detector', logdir + '/scripts/multiview_detector', dirs_exist_ok=True)
         for script in os.listdir('.'):
             if script.split('.')[-1] == 'py':
                 dst_file = os.path.join(logdir, 'scripts', os.path.basename(script))
