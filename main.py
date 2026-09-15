@@ -12,8 +12,6 @@ import torch.optim as optim
 import torchvision.transforms as T
 from multiview_detector.datasets import *
 from multiview_detector.loss.gaussian_mse import GaussianMSE
-from multiview_detector.loss.brl_gaussian_mse import BRLGaussianMSE
-from multiview_detector.loss.confuse_mse import ConfuseMSE
 from multiview_detector.loss.confuse_gaussian_mse import ConfuseGaussianMSE
 from multiview_detector.models.persp_trans_detector import PerspTransDetector
 from multiview_detector.models.image_proj_variant import ImageProjVariant
@@ -26,23 +24,8 @@ from multiview_detector.trainer import PerspectiveTrainer
 
 
 def build_criterion(args):
-    if args.loss == 'brl':
-        return BRLGaussianMSE(
-            pos_thr=args.brl_pos_thr,
-            confuse_pred_thr=args.brl_confuse_thr,
-            beta=args.brl_beta,
-            mirror=not args.brl_no_mirror,
-        ).cuda()
-    if args.loss == 'confuse':
-        # positive = hard GT points (no Gaussian pos_thr gate) -- experimental variant,
-        # see multiview_detector/loss/confuse_mse.py docstring for the known trade-off.
-        return ConfuseMSE(
-            confuse_pred_thr=args.brl_confuse_thr,
-            beta=args.brl_beta,
-            mirror=not args.brl_no_mirror,
-        ).cuda()
     if args.loss == 'confuse_gaussian':
-        # keeps the Gaussian soft target (unlike --loss confuse) but uses no pos_thr gate --
+        # keeps the Gaussian soft target but uses no pos_thr gate --
         # see multiview_detector/loss/confuse_gaussian_mse.py docstring for how it protects
         # known/kept people continuously via (1 - soft_gt) instead of a hard threshold.
         return ConfuseGaussianMSE(
@@ -104,7 +87,7 @@ def main(args):
     criterion = build_criterion(args)
 
     # logging
-    if args.loss in ('brl', 'confuse', 'confuse_gaussian'):
+    if args.loss == 'confuse_gaussian':
         loss_tag = f'{args.loss}_b{args.brl_beta}_c{args.brl_confuse_thr}'
         if args.brl_no_mirror:
             loss_tag += '_nomirror'
@@ -187,17 +170,15 @@ if __name__ == '__main__':
     parser.add_argument('--visualize', action='store_true')
     parser.add_argument('--seed', type=int, default=1, help='random seed (default: None)')
 
-    # BRL heatmap loss (Background Recalibration Loss, adapted from duclld1709/multiview-pedestrian-detection)
-    parser.add_argument('--loss', type=str, default='mse',
-                        choices=['brl', 'confuse', 'confuse_gaussian', 'mse'],
-                        help='brl = Background Recalibration heatmap loss, Gaussian pos_thr-gated; '
-                             'confuse = same idea but positive = hard GT points, no pos_thr gate '
-                             '(experimental, see confuse_mse.py docstring); confuse_gaussian = keeps '
-                             'the Gaussian soft target but no pos_thr gate, protects known people '
-                             'via a continuous (1 - soft_gt) blend instead (see '
-                             'confuse_gaussian_mse.py docstring); mse = original GaussianMSE')
-    parser.add_argument('--brl_pos_thr', type=float, default=0.1,
-                        help='soft-GT threshold for positive pixels (only used by --loss brl)')
+    # Confuse-region heatmap loss, adapted from the BRL idea in
+    # duclld1709/multiview-pedestrian-detection (Background Recalibration Loss) -- keeps the
+    # Gaussian soft target (identical to --loss mse) but uses no pos_thr gate to decide which
+    # pixels are protected: a confuse-candidate pixel (pred >= c) is blended continuously by
+    # (1 - soft_gt) instead, so pixels near a KNOWN/KEPT person are auto-protected without any
+    # extra threshold (see confuse_gaussian_mse.py docstring for the full derivation).
+    parser.add_argument('--loss', type=str, default='mse', choices=['confuse_gaussian', 'mse'],
+                        help='confuse_gaussian = Gaussian target, no pos_thr gate, continuous '
+                             '(1 - soft_gt) blend for confuse pixels; mse = original GaussianMSE')
     parser.add_argument('--brl_confuse_thr', type=float, default=0.3,
                         help='pred threshold on background to mark confuse (possible missing GT)')
     parser.add_argument('--brl_beta', type=float, default=0.1,

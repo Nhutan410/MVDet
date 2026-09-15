@@ -7,7 +7,7 @@ class ConfuseGaussianMSE(nn.Module):
     """
     Keeps the Gaussian soft target (identical to GaussianMSE), but does NOT use
     pos_thr or any other threshold on soft_gt to gate which pixels count as
-    "positive" vs "background" vs "confuse" (unlike BRLGaussianMSE).
+    "positive" vs "background" vs "confuse".
 
     Confuse-candidate status is determined purely by the model's own
     prediction: pred >= c (self.confuse_pred_thr). The STRENGTH of the confuse
@@ -20,8 +20,7 @@ class ConfuseGaussianMSE(nn.Module):
         missed detection under partial annotation.
 
     So the only threshold anywhere in this loss is c itself -- no pos_thr, no
-    other hidden cutoff (contrast with ConfuseMSE, which drops Gaussian
-    entirely and uses hard GT points instead).
+    other hidden cutoff.
     """
 
     def __init__(self, confuse_pred_thr=0.3, beta=0.1, mirror=True):
