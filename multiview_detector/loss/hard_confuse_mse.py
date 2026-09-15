@@ -3,7 +3,7 @@ from torch import nn
 import torch.nn.functional as F
 
 
-class BRLHardGT(nn.Module):
+class HardConfuseMSE(nn.Module):
     """
     Variant of BRLGaussianMSE that drops the Gaussian pos_thr gate entirely.
 
