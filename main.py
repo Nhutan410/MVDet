@@ -13,6 +13,7 @@ import torch.optim as optim
 import torchvision.transforms as T
 from multiview_detector.datasets import *
 from multiview_detector.loss.gaussian_mse import GaussianMSE
+from multiview_detector.loss.brl_gaussian_mse import BRLGaussianMSE
 from multiview_detector.models.persp_trans_detector import PerspTransDetector
 from multiview_detector.models.image_proj_variant import ImageProjVariant
 from multiview_detector.models.res_proj_variant import ResProjVariant
@@ -21,6 +22,17 @@ from multiview_detector.utils.logger import Logger
 from multiview_detector.utils.draw_curve import draw_curve
 from multiview_detector.utils.image_utils import img_color_denormalize
 from multiview_detector.trainer import PerspectiveTrainer
+
+
+def build_criterion(args):
+    if args.loss == 'brl':
+        return BRLGaussianMSE(
+            pos_thr=args.brl_pos_thr,
+            confuse_pred_thr=args.brl_confuse_thr,
+            beta=args.brl_beta,
+            mirror=not args.brl_no_mirror,
+        ).cuda()
+    return GaussianMSE().cuda()
 
 
 def main(args):
@@ -71,11 +83,17 @@ def main(args):
                                                     epochs=args.epochs)
 
     # loss
-    criterion = GaussianMSE().cuda()
+    criterion = build_criterion(args)
 
     # logging
-    logdir = f'logs/{args.dataset}_frame/{args.variant}/' + datetime.datetime.today().strftime('%Y-%m-%d_%H-%M-%S') \
-        if not args.resume else f'logs/{args.dataset}_frame/{args.variant}/{args.resume}'
+    if args.loss == 'brl':
+        loss_tag = f'brl_b{args.brl_beta}_c{args.brl_confuse_thr}'
+        if args.brl_no_mirror:
+            loss_tag += '_nomirror'
+    else:
+        loss_tag = 'mse'
+    logdir = f'logs/{args.dataset}_frame/{loss_tag}/{args.variant}/' + datetime.datetime.today().strftime('%Y-%m-%d_%H-%M-%S') \
+        if not args.resume else f'logs/{args.dataset}_frame/{loss_tag}/{args.variant}/{args.resume}'
     if args.resume is None:
         os.makedirs(logdir, exist_ok=True)
         copy_tree('./multiview_detector', logdir + '/scripts/multiview_detector')
@@ -120,7 +138,7 @@ def main(args):
             # save
             torch.save(model.state_dict(), os.path.join(logdir, 'MultiviewDetector.pth'))
     else:
-        resume_dir = f'logs/{args.dataset}_frame/{args.variant}/' + args.resume
+        resume_dir = f'logs/{args.dataset}_frame/{loss_tag}/{args.variant}/' + args.resume
         resume_fname = resume_dir + '/MultiviewDetector.pth'
         model.load_state_dict(torch.load(resume_fname))
         model.eval()
@@ -150,6 +168,19 @@ if __name__ == '__main__':
     parser.add_argument('--resume', type=str, default=None)
     parser.add_argument('--visualize', action='store_true')
     parser.add_argument('--seed', type=int, default=1, help='random seed (default: None)')
+
+    # BRL heatmap loss (Background Recalibration Loss, adapted from duclld1709/multiview-pedestrian-detection)
+    parser.add_argument('--loss', type=str, default='mse', choices=['brl', 'mse'],
+                        help='brl = Background Recalibration heatmap loss (for partial-annotation '
+                             'training); mse = original GaussianMSE')
+    parser.add_argument('--brl_pos_thr', type=float, default=0.1,
+                        help='soft-GT threshold for positive pixels')
+    parser.add_argument('--brl_confuse_thr', type=float, default=0.3,
+                        help='pred threshold on background to mark confuse (possible missing GT)')
+    parser.add_argument('--brl_beta', type=float, default=0.1,
+                        help='weight / strength of confuse term')
+    parser.add_argument('--brl_no_mirror', action='store_true',
+                        help='if set, down-weight bg MSE on confuse instead of mirroring toward 1')
     args = parser.parse_args()
 
     main(args)
