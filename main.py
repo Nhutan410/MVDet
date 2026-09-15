@@ -13,7 +13,7 @@ import torchvision.transforms as T
 from multiview_detector.datasets import *
 from multiview_detector.loss.gaussian_mse import GaussianMSE
 from multiview_detector.loss.brl_gaussian_mse import BRLGaussianMSE
-from multiview_detector.loss.hard_confuse_mse import HardConfuseMSE
+from multiview_detector.loss.confuse_mse import ConfuseMSE
 from multiview_detector.models.persp_trans_detector import PerspTransDetector
 from multiview_detector.models.image_proj_variant import ImageProjVariant
 from multiview_detector.models.res_proj_variant import ResProjVariant
@@ -32,10 +32,10 @@ def build_criterion(args):
             beta=args.brl_beta,
             mirror=not args.brl_no_mirror,
         ).cuda()
-    if args.loss == 'hard_confuse':
+    if args.loss == 'confuse':
         # positive = hard GT points (no Gaussian pos_thr gate) -- experimental variant,
-        # see multiview_detector/loss/hard_confuse_mse.py docstring for the known trade-off.
-        return HardConfuseMSE(
+        # see multiview_detector/loss/confuse_mse.py docstring for the known trade-off.
+        return ConfuseMSE(
             confuse_pred_thr=args.brl_confuse_thr,
             beta=args.brl_beta,
             mirror=not args.brl_no_mirror,
@@ -94,7 +94,7 @@ def main(args):
     criterion = build_criterion(args)
 
     # logging
-    if args.loss in ('brl', 'hard_confuse'):
+    if args.loss in ('brl', 'confuse'):
         loss_tag = f'{args.loss}_b{args.brl_beta}_c{args.brl_confuse_thr}'
         if args.brl_no_mirror:
             loss_tag += '_nomirror'
@@ -178,10 +178,10 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=1, help='random seed (default: None)')
 
     # BRL heatmap loss (Background Recalibration Loss, adapted from duclld1709/multiview-pedestrian-detection)
-    parser.add_argument('--loss', type=str, default='mse', choices=['brl', 'hard_confuse', 'mse'],
+    parser.add_argument('--loss', type=str, default='mse', choices=['brl', 'confuse', 'mse'],
                         help='brl = Background Recalibration heatmap loss, Gaussian pos_thr-gated; '
-                             'hard_confuse = same idea but positive = hard GT points, no pos_thr gate '
-                             '(experimental, see hard_confuse_mse.py docstring); mse = original GaussianMSE')
+                             'confuse = same idea but positive = hard GT points, no pos_thr gate '
+                             '(experimental, see confuse_mse.py docstring); mse = original GaussianMSE')
     parser.add_argument('--brl_pos_thr', type=float, default=0.1,
                         help='soft-GT threshold for positive pixels (only used by --loss brl)')
     parser.add_argument('--brl_confuse_thr', type=float, default=0.3,
