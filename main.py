@@ -40,7 +40,7 @@ def build_criterion(args):
         return HeteroscedasticGaussianMSE(
             n_min=args.het_n_min,
             n_max=args.het_n_max,
-            one_sided=args.het_one_sided,
+            one_sided=not args.het_two_sided,
         ).cuda()
     return GaussianMSE().cuda()
 
@@ -104,8 +104,8 @@ def main(args):
             loss_tag += '_nomirror'
     elif args.loss == 'hetero':
         loss_tag = f'{args.loss}_nmin{args.het_n_min}_nmax{args.het_n_max}'
-        if args.het_one_sided:
-            loss_tag += '_onesided'
+        if args.het_two_sided:
+            loss_tag += '_twosided'
     else:
         loss_tag = 'mse'
     logdir = f'logs/{args.dataset}_frame/{loss_tag}/{args.variant}/' + datetime.datetime.today().strftime('%Y-%m-%d_%H-%M-%S') \
@@ -209,8 +209,9 @@ if __name__ == '__main__':
                         help='lower bound of learned noise variance (default 0.09 = 0.3^2)')
     parser.add_argument('--het_n_max', type=float, default=1.0,
                         help='upper bound of learned noise variance')
-    parser.add_argument('--het_one_sided', action='store_true',
-                        help='only forgive pixels with pred > soft_gt (missing-annotation direction)')
+    parser.add_argument('--het_two_sided', action='store_true',
+                        help='also forgive pred < soft_gt (default: one-sided, only the pred > soft_gt '
+                             '"missing annotation" direction -- two-sided collapses to pred ~ 0 early on)')
     args = parser.parse_args()
 
     main(args)
