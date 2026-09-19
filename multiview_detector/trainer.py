@@ -46,12 +46,13 @@ class PerspectiveTrainer(BaseTrainer):
 
     def _noise_stats(self, map_noise):
         # mean learned variance and fraction of pixels the loss is currently "forgiving"
-        # (weight n_min / n below 1/2, i.e. n > 2 n_min) -- purely for logging
+        # (n above the halfway point of [n_min, n_max]) -- purely for logging
         if map_noise is None or not hasattr(self.criterion, 'noise_to_variance'):
             return None
         with torch.no_grad():
             n = self.criterion.noise_to_variance(map_noise)
-            return n.mean().item(), (n > 2 * self.criterion.n_min).float().mean().item()
+            mid = (self.criterion.n_min + self.criterion.n_max) / 2
+            return n.mean().item(), (n > mid).float().mean().item()
 
     def train(self, epoch, data_loader, optimizer, log_interval=100, cyclic_scheduler=None):
         self.model.train()
