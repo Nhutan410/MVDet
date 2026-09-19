@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 
 
 class PerspTransDetector(nn.Module):
-    def __init__(self, dataset, arch='resnet18'):
+    def __init__(self, dataset, arch='resnet18', noise_head=False):
         super().__init__()
         # Original code hardcodes a 2-GPU split (backbone half on cuda:1, the rest on cuda:0) --
         # a VRAM workaround from the original paper's hardware, not a correctness requirement.
@@ -58,6 +58,17 @@ class PerspTransDetector(nn.Module):
                                             # nn.Conv2d(512, 512, 5, 1, 2), nn.ReLU(),
                                             nn.Conv2d(512, 512, 3, padding=2, dilation=2), nn.ReLU(),
                                             nn.Conv2d(512, 1, 3, padding=4, dilation=4, bias=False)).to(self.device_pt2)
+        # Optional per-pixel label-noise head for HeteroscedasticGaussianMSE: branches off the
+        # joint-conv trunk (everything in map_classifier but its last conv) so it sees the same
+        # multi-view aggregated features the occupancy head sees. map_classifier itself is kept
+        # intact (same parameter names) so checkpoints trained without the head still load.
+        # Bias starts strongly negative so sigmoid(noise) ~ 0 -> n ~ n_min: training starts as
+        # plain GaussianMSE and n only grows where the loss finds it worth paying log n for.
+        self.map_noise_head = None
+        if noise_head:
+            self.map_noise_head = nn.Conv2d(512, 1, 3, padding=4, dilation=4).to(self.device_pt2)
+            nn.init.zeros_(self.map_noise_head.weight)
+            nn.init.constant_(self.map_noise_head.bias, -4.0)
         pass
 
     def forward(self, imgs, visualize=False):
@@ -84,13 +95,18 @@ class PerspTransDetector(nn.Module):
         if visualize:
             plt.imshow(torch.norm(world_features[0].detach(), dim=0).cpu().numpy())
             plt.show()
-        map_result = self.map_classifier(world_features.to(self.device_pt2))
+        map_trunk = self.map_classifier[:-1](world_features.to(self.device_pt2))
+        map_result = self.map_classifier[-1](map_trunk)
         map_result = F.interpolate(map_result, self.reducedgrid_shape, mode='bilinear')
 
         if visualize:
             plt.imshow(torch.norm(map_result[0].detach(), dim=0).cpu().numpy())
             plt.show()
-        return map_result, imgs_result
+        if self.map_noise_head is None:
+            return map_result, imgs_result
+        map_noise = self.map_noise_head(map_trunk)
+        map_noise = F.interpolate(map_noise, self.reducedgrid_shape, mode='bilinear')
+        return map_result, imgs_result, map_noise
 
     def get_imgcoord2worldgrid_matrices(self, intrinsic_matrices, extrinsic_matrices, worldgrid2worldcoord_mat):
         projection_matrices = {}

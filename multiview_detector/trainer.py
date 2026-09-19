@@ -27,27 +27,55 @@ class PerspectiveTrainer(BaseTrainer):
         self.denormalize = denormalize
         self.alpha = alpha
 
+    def _forward(self, data):
+        # model returns (map_res, imgs_res) or, with a noise head, (map_res, imgs_res, map_noise)
+        out = self.model(data)
+        map_res, imgs_res = out[0], out[1]
+        map_noise = out[2] if len(out) > 2 else None
+        return map_res, imgs_res, map_noise
+
+    def _loss(self, map_res, imgs_res, map_noise, map_gt, imgs_gt, dataset):
+        loss = 0
+        for img_res, img_gt in zip(imgs_res, imgs_gt):
+            loss += self.criterion(img_res, img_gt.to(img_res.device), dataset.img_kernel)
+        # only the map head has a noise head; per-view heads use the plain Gaussian MSE fallback
+        map_kwargs = {} if map_noise is None else {'noise': map_noise}
+        loss = self.criterion(map_res, map_gt.to(map_res.device), dataset.map_kernel, **map_kwargs) + \
+               loss / len(imgs_gt) * self.alpha
+        return loss
+
+    def _noise_stats(self, map_noise):
+        # mean learned variance and fraction of pixels the loss is currently "forgiving"
+        # (n above the halfway point of [n_min, n_max]) -- purely for logging
+        if map_noise is None or not hasattr(self.criterion, 'noise_to_variance'):
+            return None
+        with torch.no_grad():
+            n = self.criterion.noise_to_variance(map_noise)
+            mid = (self.criterion.n_min + self.criterion.n_max) / 2
+            return n.mean().item(), (n > mid).float().mean().item()
+
     def train(self, epoch, data_loader, optimizer, log_interval=100, cyclic_scheduler=None):
         self.model.train()
         losses = 0
         precision_s, recall_s = AverageMeter(), AverageMeter()
+        noise_mean_s, noise_frac_s = AverageMeter(), AverageMeter()
         t0 = time.time()
         t_b = time.time()
         t_forward = 0
         t_backward = 0
         for batch_idx, (data, map_gt, imgs_gt, _) in enumerate(data_loader):
             optimizer.zero_grad()
-            map_res, imgs_res = self.model(data)
+            map_res, imgs_res, map_noise = self._forward(data)
             t_f = time.time()
             t_forward += t_f - t_b
-            loss = 0
-            for img_res, img_gt in zip(imgs_res, imgs_gt):
-                loss += self.criterion(img_res, img_gt.to(img_res.device), data_loader.dataset.img_kernel)
-            loss = self.criterion(map_res, map_gt.to(map_res.device), data_loader.dataset.map_kernel) + \
-                   loss / len(imgs_gt) * self.alpha
+            loss = self._loss(map_res, imgs_res, map_noise, map_gt, imgs_gt, data_loader.dataset)
             loss.backward()
             optimizer.step()
             losses += loss.item()
+            noise_stats = self._noise_stats(map_noise)
+            if noise_stats is not None:
+                noise_mean_s.update(noise_stats[0])
+                noise_frac_s.update(noise_stats[1])
             pred = (map_res > self.cls_thres).int().to(map_gt.device)
             true_positive = (pred.eq(map_gt) * pred.eq(1)).sum().item()
             false_positive = pred.sum().item() - true_positive
@@ -72,14 +100,18 @@ class PerspectiveTrainer(BaseTrainer):
                 print('Train Epoch: {}, Batch:{}, Loss: {:.6f}, '
                       'prec: {:.1f}%, recall: {:.1f}%, Time: {:.1f} (f{:.3f}+b{:.3f}), maxima: {:.3f}'.format(
                     epoch, (batch_idx + 1), losses / (batch_idx + 1), precision_s.avg * 100, recall_s.avg * 100,
-                    t_epoch, t_forward / batch_idx, t_backward / batch_idx, map_res.max()))
+                    t_epoch, t_forward / batch_idx, t_backward / batch_idx, map_res.max()) +
+                      (', noise_mean: {:.4f}, noise_frac: {:.4f}'.format(noise_mean_s.avg, noise_frac_s.avg)
+                       if noise_stats is not None else ''))
                 pass
 
         t1 = time.time()
         t_epoch = t1 - t0
         print('Train Epoch: {}, Batch:{}, Loss: {:.6f}, '
               'Precision: {:.1f}%, Recall: {:.1f}%, Time: {:.3f}'.format(
-            epoch, len(data_loader), losses / len(data_loader), precision_s.avg * 100, recall_s.avg * 100, t_epoch))
+            epoch, len(data_loader), losses / len(data_loader), precision_s.avg * 100, recall_s.avg * 100, t_epoch) +
+              (', noise_mean: {:.4f}, noise_frac: {:.4f}'.format(noise_mean_s.avg, noise_frac_s.avg)
+               if noise_mean_s.count > 0 else ''))
 
         return losses / len(data_loader), precision_s.avg * 100
 
@@ -93,7 +125,7 @@ class PerspectiveTrainer(BaseTrainer):
             assert gt_fpath is not None
         for batch_idx, (data, map_gt, imgs_gt, frame) in enumerate(data_loader):
             with torch.no_grad():
-                map_res, imgs_res = self.model(data)
+                map_res, imgs_res, map_noise = self._forward(data)
             if res_fpath is not None:
                 map_grid_res = map_res.detach().cpu().squeeze()
                 v_s = map_grid_res[map_grid_res > self.cls_thres].unsqueeze(1)
@@ -105,11 +137,8 @@ class PerspectiveTrainer(BaseTrainer):
                 all_res_list.append(torch.cat([torch.ones_like(v_s) * frame, grid_xy.float() *
                                                data_loader.dataset.grid_reduce, v_s], dim=1))
 
-            loss = 0
-            for img_res, img_gt in zip(imgs_res, imgs_gt):
-                loss += self.criterion(img_res, img_gt.to(img_res.device), data_loader.dataset.img_kernel)
-            loss = self.criterion(map_res, map_gt.to(map_res.device), data_loader.dataset.map_kernel) + \
-                   loss / len(imgs_gt) * self.alpha
+            with torch.no_grad():
+                loss = self._loss(map_res, imgs_res, map_noise, map_gt, imgs_gt, data_loader.dataset)
             losses += loss.item()
             pred = (map_res > self.cls_thres).int().to(map_gt.device)
             true_positive = (pred.eq(map_gt) * pred.eq(1)).sum().item()
@@ -124,12 +153,17 @@ class PerspectiveTrainer(BaseTrainer):
         t_epoch = t1 - t0
 
         if visualize:
-            fig = plt.figure()
-            subplt0 = fig.add_subplot(211, title="output")
-            subplt1 = fig.add_subplot(212, title="target")
+            n_rows = 3 if map_noise is not None else 2
+            fig = plt.figure(figsize=(6, 3 * n_rows))
+            subplt0 = fig.add_subplot(n_rows, 1, 1, title="output")
+            subplt1 = fig.add_subplot(n_rows, 1, 2, title="target")
             subplt0.imshow(map_res.cpu().detach().numpy().squeeze())
             subplt1.imshow(self.criterion._traget_transform(map_res, map_gt, data_loader.dataset.map_kernel)
                            .cpu().detach().numpy().squeeze())
+            if map_noise is not None:
+                n = self.criterion.noise_to_variance(map_noise).cpu().detach().numpy().squeeze()
+                subplt2 = fig.add_subplot(n_rows, 1, 3, title="learned noise variance n")
+                subplt2.imshow(n, vmin=self.criterion.n_min, vmax=self.criterion.n_max)
             plt.savefig(os.path.join(self.logdir, 'map.jpg'))
             plt.close(fig)
 

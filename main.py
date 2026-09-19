@@ -13,6 +13,7 @@ import torchvision.transforms as T
 from multiview_detector.datasets import *
 from multiview_detector.loss.gaussian_mse import GaussianMSE
 from multiview_detector.loss.confuse_gaussian_mse import ConfuseGaussianMSE
+from multiview_detector.loss.heteroscedastic_gaussian_mse import HeteroscedasticGaussianMSE
 from multiview_detector.models.persp_trans_detector import PerspTransDetector
 from multiview_detector.models.image_proj_variant import ImageProjVariant
 from multiview_detector.models.res_proj_variant import ResProjVariant
@@ -32,6 +33,14 @@ def build_criterion(args):
             confuse_pred_thr=args.brl_confuse_thr,
             beta=args.brl_beta,
             mirror=not args.brl_no_mirror,
+        ).cuda()
+    if args.loss == 'hetero':
+        # learned per-pixel label-noise variance from the model's map_noise_head --
+        # see multiview_detector/loss/heteroscedastic_gaussian_mse.py
+        return HeteroscedasticGaussianMSE(
+            n_min=args.het_n_min,
+            n_max=args.het_n_max,
+            one_sided=args.het_one_sided,
         ).cuda()
     return GaussianMSE().cuda()
 
@@ -68,8 +77,10 @@ def main(args):
                                               num_workers=args.num_workers, pin_memory=True)
 
     # model
+    if args.loss == 'hetero' and args.variant != 'default':
+        raise Exception('--loss hetero needs the map_noise_head, only implemented in the default variant')
     if args.variant == 'default':
-        model = PerspTransDetector(train_set, args.arch)
+        model = PerspTransDetector(train_set, args.arch, noise_head=(args.loss == 'hetero'))
     elif args.variant == 'img_proj':
         model = ImageProjVariant(train_set, args.arch)
     elif args.variant == 'res_proj':
@@ -91,6 +102,10 @@ def main(args):
         loss_tag = f'{args.loss}_b{args.brl_beta}_c{args.brl_confuse_thr}'
         if args.brl_no_mirror:
             loss_tag += '_nomirror'
+    elif args.loss == 'hetero':
+        loss_tag = f'{args.loss}_nmin{args.het_n_min}_nmax{args.het_n_max}'
+        if args.het_one_sided:
+            loss_tag += '_onesided'
     else:
         loss_tag = 'mse'
     logdir = f'logs/{args.dataset}_frame/{loss_tag}/{args.variant}/' + datetime.datetime.today().strftime('%Y-%m-%d_%H-%M-%S') \
@@ -176,15 +191,26 @@ if __name__ == '__main__':
     # pixels are protected: a confuse-candidate pixel (pred >= c) is blended continuously by
     # (1 - soft_gt) instead, so pixels near a KNOWN/KEPT person are auto-protected without any
     # extra threshold (see confuse_gaussian_mse.py docstring for the full derivation).
-    parser.add_argument('--loss', type=str, default='mse', choices=['confuse_gaussian', 'mse'],
+    parser.add_argument('--loss', type=str, default='mse', choices=['confuse_gaussian', 'hetero', 'mse'],
                         help='confuse_gaussian = Gaussian target, no pos_thr gate, continuous '
-                             '(1 - soft_gt) blend for confuse pixels; mse = original GaussianMSE')
+                             '(1 - soft_gt) blend for confuse pixels; hetero = Gaussian target with a '
+                             'learned per-pixel noise variance (adds map_noise_head to the model); '
+                             'mse = original GaussianMSE')
     parser.add_argument('--brl_confuse_thr', type=float, default=0.3,
                         help='pred threshold on background to mark confuse (possible missing GT)')
     parser.add_argument('--brl_beta', type=float, default=0.1,
                         help='weight / strength of confuse term')
     parser.add_argument('--brl_no_mirror', action='store_true',
                         help='if set, down-weight bg MSE on confuse instead of mirroring toward 1')
+    # Heteroscedastic loss (--loss hetero): n in [n_min, n_max]; sqrt(n_min) is the residual below
+    # which a pixel is never forgiven (continuous counterpart of the old confuse threshold c),
+    # n_min / n_max is the smallest per-pixel weight a suspicious pixel can get.
+    parser.add_argument('--het_n_min', type=float, default=0.09,
+                        help='lower bound of learned noise variance (default 0.09 = 0.3^2)')
+    parser.add_argument('--het_n_max', type=float, default=1.0,
+                        help='upper bound of learned noise variance')
+    parser.add_argument('--het_one_sided', action='store_true',
+                        help='only forgive pixels with pred > soft_gt (missing-annotation direction)')
     args = parser.parse_args()
 
     main(args)
